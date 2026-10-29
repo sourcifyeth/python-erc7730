@@ -90,4 +90,50 @@ def test_calldata_map_reference_is_rejected() -> None:
     )
 
     assert field is None
-    assert any('Map reference "callee"' in message for message in error_messages(out))
+    assert any('parameter "callee"' in message for message in error_messages(out))
+
+
+def test_collection_map_reference_is_rejected() -> None:
+    field, out = convert(
+        {
+            "path": "target",
+            "label": "NFT",
+            "format": "nftName",
+            "params": {"collection": {"map": "$.metadata.maps.tokens", "keyPath": "@.chainId"}},
+        }
+    )
+
+    assert field is None
+    assert any('parameter "collection"' in message for message in error_messages(out))
+
+
+def test_sender_address_map_reference_is_rejected() -> None:
+    field, out = convert(
+        {
+            "path": "target",
+            "label": "Target",
+            "format": "addressName",
+            "params": {"senderAddress": {"map": "$.metadata.maps.tokens", "keyPath": "@.chainId"}},
+        }
+    )
+
+    assert field is None
+    assert any('parameter "senderAddress"' in message for message in error_messages(out))
+
+
+def test_token_amount_chain_id_path_is_ignored_with_a_warning() -> None:
+    field, out = convert(
+        {
+            "path": "amount",
+            "label": "Amount",
+            "format": "tokenAmount",
+            "params": {"tokenPath": "token", "chainIdPath": "chainId"},
+        }
+    )
+
+    assert error_messages(out) == []
+    assert field is not None
+    assert field["assetPath"] == "token"
+    assert [output.title for output in out.outputs if output.level == Output.Level.WARNING] == [
+        "Chain ID not supported"
+    ]

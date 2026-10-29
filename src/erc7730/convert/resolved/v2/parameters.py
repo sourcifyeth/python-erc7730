@@ -1,7 +1,8 @@
+from collections.abc import Callable
 from typing import Any, assert_never, cast
 
 from erc7730.common.abi import ABIDataType
-from erc7730.common.output import OutputAdder
+from erc7730.common.output import ListOutputAdder, Output, OutputAdder
 from erc7730.convert.resolved.v2.address import resolved_addresses
 from erc7730.convert.resolved.v2.constants import ConstantProvider
 from erc7730.convert.resolved.v2.enums import get_enum, get_enum_id
@@ -21,6 +22,7 @@ from erc7730.model.input.v2.display import (
     InputTokenTickerParameters,
     InputUnitParameters,
 )
+from erc7730.model.input.v2.metadata import InputMapDefinition
 from erc7730.model.paths import ContainerPath, DataPath, DescriptorPath
 from erc7730.model.paths.path_ops import data_or_container_path_concat
 from erc7730.model.resolved.display import ResolvedValue
@@ -80,7 +82,11 @@ def resolve_address_name_parameters(
     sender_address: list[Address] | ResolvedMapReference | None = None
     if (sender_addr_input := params.senderAddress) is not None:
         if isinstance(sender_addr_input, InputMapReference):
-            if (sender_address := constants.resolve_map_reference(prefix, sender_addr_input, out)) is None:
+            if (
+                sender_address := resolve_map_reference(
+                    prefix, sender_addr_input, _validate_sender_addresses, constants, out
+                )
+            ) is None:
                 return None
         else:
             resolved_sender = constants.resolve_or_none(sender_addr_input, out)
@@ -106,7 +112,11 @@ def resolve_interoperable_address_name_parameters(
     sender_address: list[Address] | ResolvedMapReference | None = None
     if (sender_addr_input := params.senderAddress) is not None:
         if isinstance(sender_addr_input, InputMapReference):
-            if (sender_address := constants.resolve_map_reference(prefix, sender_addr_input, out)) is None:
+            if (
+                sender_address := resolve_map_reference(
+                    prefix, sender_addr_input, _validate_sender_addresses, constants, out
+                )
+            ) is None:
                 return None
         else:
             resolved_sender = constants.resolve_or_none(sender_addr_input, out)
@@ -136,6 +146,10 @@ def resolve_calldata_parameters(
     ) is None:
         return None
 
+    if (chain_ids := resolve_chain_id_parameters(prefix, params.chainId, params.chainIdPath, constants, out)) is None:
+        return None
+    chain_id, chain_id_path = chain_ids
+
     return ResolvedCallDataParameters(
         callee=callee,
         selector=resolve_path_constant_or_map_reference(
@@ -147,8 +161,8 @@ def resolve_calldata_parameters(
         spender=resolve_path_constant_or_map_reference(
             prefix, params.spenderPath, params.spender, ABIDataType.ADDRESS, constants, out
         ),
-        chainId=resolve_chain_id(prefix, params.chainId, constants, out),
-        chainIdPath=resolve_parameter_path(prefix, params.chainIdPath, constants, out),
+        chainId=chain_id,
+        chainIdPath=chain_id_path,
     )
 
 
@@ -160,6 +174,10 @@ def resolve_token_amount_parameters(
     )
     if token_resolved is None and (params.tokenPath is not None or params.token is not None):
         return None
+
+    if (chain_ids := resolve_chain_id_parameters(prefix, params.chainId, params.chainIdPath, constants, out)) is None:
+        return None
+    chain_id, chain_id_path = chain_ids
 
     input_addresses = cast(
         list[DescriptorPathStr | MixedCaseAddress] | MixedCaseAddress | None,
@@ -192,18 +210,19 @@ def resolve_token_amount_parameters(
         nativeCurrencyAddress=native_addresses,
         threshold=resolved_threshold,
         message=constants.resolve_or_none(params.message, out),
-        chainId=resolve_chain_id(prefix, params.chainId, constants, out),
-        chainIdPath=resolve_parameter_path(prefix, params.chainIdPath, constants, out),
+        chainId=chain_id,
+        chainIdPath=chain_id_path,
     )
 
 
 def resolve_token_ticker_parameters(
     prefix: DataPath, params: InputTokenTickerParameters, constants: ConstantProvider, out: OutputAdder
 ) -> ResolvedTokenTickerParameters | None:
-    return ResolvedTokenTickerParameters(
-        chainId=resolve_chain_id(prefix, params.chainId, constants, out),
-        chainIdPath=resolve_parameter_path(prefix, params.chainIdPath, constants, out),
-    )
+    if (chain_ids := resolve_chain_id_parameters(prefix, params.chainId, params.chainIdPath, constants, out)) is None:
+        return None
+    chain_id, chain_id_path = chain_ids
+
+    return ResolvedTokenTickerParameters(chainId=chain_id, chainIdPath=chain_id_path)
 
 
 def resolve_nft_parameters(
@@ -280,7 +299,11 @@ def resolve_path_constant_or_map_reference(
     :return: resolved value, or None if error or not set
     """
     if isinstance(input_value, InputMapReference):
-        return constants.resolve_map_reference(prefix, input_value, out)
+
+        def validate_value(value: Any, value_out: OutputAdder) -> Any:
+            return resolve_path_or_constant_value(prefix, None, value, abi_type, constants, value_out)
+
+        return resolve_map_reference(prefix, input_value, validate_value, constants, out)
     return resolve_path_or_constant_value(
         prefix=prefix,
         input_path=input_path,
@@ -289,6 +312,30 @@ def resolve_path_constant_or_map_reference(
         constants=constants,
         out=out,
     )
+
+
+def resolve_chain_id_parameters(
+    prefix: DataPath,
+    input_chain_id: int | DescriptorPath | InputMapReference | None,
+    input_chain_id_path: DescriptorPath | DataPath | ContainerPath | None,
+    constants: ConstantProvider,
+    out: OutputAdder,
+) -> tuple[int | ResolvedMapReference | None, DataPath | ContainerPath | None] | None:
+    """
+    Resolve the chainId and chainIdPath parameters.
+
+    :param prefix: current path prefix
+    :param input_chain_id: input chain ID, constant path or map reference, if provided
+    :param input_chain_id_path: input chain ID path, if provided
+    :param constants: descriptor paths constants resolver
+    :param out: error handler
+    :return: resolved chain ID and chain ID path, or None if error
+    """
+    chain_id = resolve_chain_id(prefix, input_chain_id, constants, out)
+    chain_id_path = resolve_parameter_path(prefix, input_chain_id_path, constants, out)
+    if (input_chain_id is not None and chain_id is None) or (input_chain_id_path is not None and chain_id_path is None):
+        return None
+    return chain_id, chain_id_path
 
 
 def resolve_chain_id(
@@ -309,16 +356,10 @@ def resolve_chain_id(
     if input_chain_id is None:
         return None
     if isinstance(input_chain_id, InputMapReference):
-        return constants.resolve_map_reference(prefix, input_chain_id, out)
-    chain_id: Any = constants.resolve(input_chain_id, out)
-    if chain_id is None:
+        return resolve_map_reference(prefix, input_chain_id, _validate_chain_id, constants, out)
+    if (chain_id := constants.resolve(input_chain_id, out)) is None:
         return None
-    if isinstance(chain_id, bool) or not isinstance(chain_id, int):
-        return out.error(
-            title="Invalid chain ID",
-            message=f"Chain ID defined at {input_chain_id} must be an integer, got {type(chain_id).__name__}.",
-        )
-    return chain_id
+    return _validate_chain_id(chain_id, out)
 
 
 def resolve_parameter_path(
@@ -339,3 +380,45 @@ def resolve_parameter_path(
     if (path := constants.resolve_path_or_none(input_path, out)) is None:
         return None
     return data_or_container_path_concat(prefix, path)
+
+
+def resolve_map_reference(
+    prefix: DataPath,
+    map_ref: InputMapReference,
+    validate_value: Callable[[Any, OutputAdder], Any],
+    constants: ConstantProvider,
+    out: OutputAdder,
+) -> ResolvedMapReference | None:
+    """
+    Resolve a map reference, and validate each value of the referenced map.
+
+    :param prefix: current path prefix
+    :param map_ref: input map reference
+    :param validate_value: validator of a map value, returns None if the value is invalid
+    :param constants: descriptor paths constants resolver
+    :param out: error handler
+    :return: resolved map reference, or None if error
+    """
+    if (resolved := constants.resolve_map_reference(prefix, map_ref, out)) is None:
+        return None
+    map_def = cast(InputMapDefinition, constants.get(map_ref.map, out))
+    for key, value in map_def.values.items():
+        value_out = ListOutputAdder()
+        if validate_value(value, value_out) is None or value_out.has_errors:
+            reasons = [output.message for output in value_out.outputs if output.level == Output.Level.ERROR]
+            return out.error(
+                title="Invalid map value",
+                message=f'Value for key "{key}" in map {map_ref.map} is invalid: '
+                + (" ".join(reasons) if reasons else "the value is null."),
+            )
+    return resolved
+
+
+def _validate_chain_id(value: Any, out: OutputAdder) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return out.error(title="Invalid chain ID", message=f"Chain ID must be an integer, got {type(value).__name__}.")
+    return value
+
+
+def _validate_sender_addresses(value: Any, out: OutputAdder) -> list[Address] | None:
+    return resolved_addresses(value if isinstance(value, list) else [value], out)

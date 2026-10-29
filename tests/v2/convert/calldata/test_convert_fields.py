@@ -329,6 +329,21 @@ def test_convert_rejects_map_reference_without_static_value(key_path: str, maps:
     assert convert_descriptor("deposit(uint256 amount)", field, metadata={"maps": maps}) == []
 
 
+def test_convert_token_amount_chain_id_is_ignored_with_a_warning(capsys: pytest.CaptureFixture[str]) -> None:
+    field = convert_field(
+        "transfer(address token, uint256 amount, uint256 chainId)",
+        {
+            "path": "amount",
+            "label": "Amount",
+            "format": "tokenAmount",
+            "params": {"tokenPath": "token", "chainIdPath": "chainId"},
+        },
+    )
+
+    assert isinstance(field.param, CalldataDescriptorParamTokenAmountV1)
+    assert "PARAM_TOKEN_AMOUNT" in capsys.readouterr().out
+
+
 def parse_tlv(payload: bytes) -> list[tuple[int, bytes]]:
     """Parse a TLV payload into (tag, value) records, following the DER tag / length encoding."""
 

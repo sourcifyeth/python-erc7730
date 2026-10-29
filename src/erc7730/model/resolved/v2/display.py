@@ -155,7 +155,7 @@ class ResolvedTokenAmountParameters(Model):
         ),
     )
 
-    chainIdPath: DescriptorPathStr | DataPathStr | ContainerPathStr | None = Field(
+    chainIdPath: DataPathStr | ContainerPathStr | None = Field(
         default=None,
         title="Chain ID Path",
         description=(
@@ -266,7 +266,7 @@ class ResolvedCallDataParameters(Model):
         "contract's chain, as constant value or map reference.",
     )
 
-    chainIdPath: DescriptorPathStr | DataPathStr | ContainerPathStr | None = Field(
+    chainIdPath: DataPathStr | ContainerPathStr | None = Field(
         default=None,
         title="Chain ID Path",
         description="Optional. The resolved path to the chain ID of the called contract, if it differs from the "
@@ -354,7 +354,7 @@ class ResolvedTokenTickerParameters(Model):
         ),
     )
 
-    chainIdPath: DescriptorPathStr | DataPathStr | ContainerPathStr | None = Field(
+    chainIdPath: DataPathStr | ContainerPathStr | None = Field(
         default=None,
         title="Chain ID Path",
         description=(

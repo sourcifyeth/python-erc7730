@@ -226,6 +226,16 @@ def _convert_v2_field_description(
 
     relative_path = str(to_relative(parsed_path))
 
+    # the legacy format has no equivalent of a map reference, in any parameter
+    if field.params is not None:
+        for name in type(field.params).model_fields:
+            if isinstance(map_ref := getattr(field.params, name), ResolvedMapReference):
+                return out.error(
+                    title="Map reference not supported",
+                    message=f'Map reference {map_ref.map} in parameter "{name}" cannot be converted to legacy '
+                    "EIP-712 fields.",
+                )
+
     # --- Format mapping ---
     asset_path: str | None = None
     field_format: EIP712Format | None = None
@@ -272,16 +282,16 @@ def _convert_v2_field_description(
                         title="Constant token not supported",
                         message="Constant token addresses cannot be converted to legacy EIP-712 fields.",
                     )
-                elif isinstance(field.params.token, ResolvedMapReference):
-                    return out.error(
-                        title="Map reference not supported",
-                        message=f"Token map reference {field.params.token.map} cannot be converted to legacy "
-                        "EIP-712 fields.",
-                    )
                 else:
                     return out.error(
                         title="Missing token",
                         message="Token path or reference must be set for tokenAmount format.",
+                    )
+                if field.params.chainId is not None or field.params.chainIdPath is not None:
+                    out.warning(
+                        title="Chain ID not supported",
+                        message="tokenAmount chainId/chainIdPath cannot be converted to legacy EIP-712 fields and "
+                        "will be ignored.",
                     )
         case FieldFormat.INTEROPERABLE_ADDRESS_NAME:
             field_format = EIP712Format.TRUSTED_NAME
@@ -328,8 +338,6 @@ def _convert_v2_field_description(
                 return None
             if isinstance(value, ResolvedValuePath):
                 return _resolve_calldata_param_path(str(value.path))
-            if isinstance(value, ResolvedMapReference):
-                raise ValueError(f'Map reference "{field_name}" is not supported for calldata parameter conversion.')
             raise ValueError(f'Constant "{field_name}" is not supported for calldata parameter conversion.')
 
         try:

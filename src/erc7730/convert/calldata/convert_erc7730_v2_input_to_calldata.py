@@ -21,7 +21,7 @@ from erc7730.common.abi import (
 from erc7730.common.binary import from_hex
 from erc7730.common.ledger import ledger_network_id
 from erc7730.common.options import first_not_none
-from erc7730.common.output import ConsoleOutputAdder, OutputAdder, exception_to_output
+from erc7730.common.output import ConsoleOutputAdder, ListOutputAdder, Output, OutputAdder, exception_to_output
 from erc7730.convert.calldata.v1.abi import ABITree, function_to_abi_tree
 from erc7730.convert.calldata.v1.enum import convert_enums
 from erc7730.convert.calldata.v1.path import (
@@ -340,7 +340,7 @@ def _convert_v2_field(
         try:
             param = _convert_v2_param(abi=abi, field=field, enums=enums, maps=maps, deployment=deployment, out=out)
         except MapReferenceError as e:
-            return out.error(title="Unsupported map reference", message=str(e))
+            return out.error(title=e.title, message=str(e))
         if param is None:
             return None
 
@@ -695,6 +695,18 @@ def _format_to_abi_type(format_type: FieldFormat | None) -> ABIDataType:
 class MapReferenceError(Exception):
     """A map reference cannot be converted to a calldata descriptor value."""
 
+    def __init__(self, title: str, message: str) -> None:
+        super().__init__(message)
+        self.title = title
+
+
+UNSUPPORTED_MAP_REFERENCE = "Unsupported map reference"
+INVALID_MAP_REFERENCE_VALUE = "Invalid map reference value"
+
+
+def _error_messages(out: ListOutputAdder) -> str:
+    return " ".join(output.message for output in out.outputs if output.level == Output.Level.ERROR)
+
 
 def _resolve_v2_map_reference(
     map_ref: ResolvedMapReference, maps: dict[Id, ResolvedMapDefinition] | None, deployment: ResolvedDeployment
@@ -712,14 +724,17 @@ def _resolve_v2_map_reference(
     """
     if map_ref.keyPath != CHAIN_ID_CONTAINER_PATH:
         raise MapReferenceError(
+            UNSUPPORTED_MAP_REFERENCE,
             f"Map reference {map_ref.map} uses key path {map_ref.keyPath}, only maps keyed by "
-            f"{CHAIN_ID_CONTAINER_PATH} can be converted to calldata descriptors."
+            f"{CHAIN_ID_CONTAINER_PATH} can be converted to calldata descriptors.",
         )
     map_id = str(map_ref.map).removeprefix(MAPS_DESCRIPTOR_PATH + ".")
     if maps is None or (map_def := maps.get(map_id)) is None:
-        raise MapReferenceError(f"Map {map_ref.map} is not defined.")
+        raise MapReferenceError(INVALID_MAP_REFERENCE_VALUE, f"Map {map_ref.map} is not defined.")
     if (value := map_def.values.get(str(deployment.chainId))) is None:
-        raise MapReferenceError(f"Map {map_ref.map} has no value for chain id {deployment.chainId}.")
+        raise MapReferenceError(
+            INVALID_MAP_REFERENCE_VALUE, f"Map {map_ref.map} has no value for chain id {deployment.chainId}."
+        )
     return value
 
 
@@ -763,9 +778,16 @@ def _convert_v2_param(
             case ResolvedMapReference():
                 constant = _resolve_v2_map_reference(resolved_value, maps, deployment)
                 if not isinstance(constant, str | bool | int | float):
-                    raise MapReferenceError(f"Map {resolved_value.map} value must be a scalar, got {constant!r}.")
-                if abi_type == ABIDataType.ADDRESS and resolved_address(constant, out) is None:
-                    raise MapReferenceError(f"Map {resolved_value.map} value {constant!r} is not a valid address.")
+                    raise MapReferenceError(
+                        INVALID_MAP_REFERENCE_VALUE,
+                        f"Map {resolved_value.map} value must be a scalar, got {constant!r}.",
+                    )
+                address_out = ListOutputAdder()
+                if abi_type == ABIDataType.ADDRESS and resolved_address(constant, address_out) is None:
+                    raise MapReferenceError(
+                        INVALID_MAP_REFERENCE_VALUE,
+                        f"Map {resolved_value.map} value {constant!r} is invalid: {_error_messages(address_out)}",
+                    )
             case _:
                 constant = resolved_value
         raw = encode_value(constant, abi_type, out)
@@ -820,12 +842,17 @@ def _convert_v2_param(
                 match sender_address := getattr(address_params, "senderAddress", None):
                     case ResolvedMapReference():
                         resolved_senders = _resolve_v2_map_reference(sender_address, maps, deployment)
+                        senders_out = ListOutputAdder()
                         if (
                             sender_addresses := resolved_addresses(
-                                resolved_senders if isinstance(resolved_senders, list) else [resolved_senders], out
+                                resolved_senders if isinstance(resolved_senders, list) else [resolved_senders],
+                                senders_out,
                             )
                         ) is None:
-                            raise MapReferenceError(f"Map {sender_address.map} value is not a valid sender address.")
+                            raise MapReferenceError(
+                                INVALID_MAP_REFERENCE_VALUE,
+                                f"Map {sender_address.map} value is invalid: {_error_messages(senders_out)}",
+                            )
                     case str():
                         sender_addresses = [sender_address]
                     case _:
@@ -976,6 +1003,16 @@ def _convert_v2_param(
                 threshold = getattr(field.params, "threshold", None)
                 native_currencies = getattr(field.params, "nativeCurrencyAddress", None)
                 above_threshold_message = getattr(field.params, "message", None)
+
+                # chainId/chainIdPath have no equivalent tag in PARAM_TOKEN_AMOUNT, so they cannot be encoded.
+                if (
+                    getattr(field.params, "chainId", None) is not None
+                    or getattr(field.params, "chainIdPath", None) is not None
+                ):
+                    out.warning(
+                        "tokenAmount chainId/chainIdPath cannot be encoded in the PARAM_TOKEN_AMOUNT struct and will "
+                        "be ignored."
+                    )
 
             return CalldataDescriptorParamTokenAmountV1(
                 value=value,
