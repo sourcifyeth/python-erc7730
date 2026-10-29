@@ -43,6 +43,7 @@ from erc7730.model.resolved.v2.display import (
     ResolvedField,
     ResolvedFieldDescription,
     ResolvedFieldGroup,
+    ResolvedMapReference,
     ResolvedTokenAmountParameters,
 )
 
@@ -271,6 +272,12 @@ def _convert_v2_field_description(
                         title="Constant token not supported",
                         message="Constant token addresses cannot be converted to legacy EIP-712 fields.",
                     )
+                elif isinstance(field.params.token, ResolvedMapReference):
+                    return out.error(
+                        title="Map reference not supported",
+                        message=f"Token map reference {field.params.token.map} cannot be converted to legacy "
+                        "EIP-712 fields.",
+                    )
                 else:
                     return out.error(
                         title="Missing token",
@@ -314,22 +321,25 @@ def _convert_v2_field_description(
     ):
 
         def _resolve_calldata_resolved_value(
-            value: ResolvedValuePath | ResolvedValueConstant | None,
+            value: ResolvedValuePath | ResolvedValueConstant | ResolvedMapReference | int | None,
             field_name: str,
         ) -> str | None:
             if value is None:
                 return None
             if isinstance(value, ResolvedValuePath):
                 return _resolve_calldata_param_path(str(value.path))
-            if isinstance(value, ResolvedValueConstant):
-                raise ValueError(f'Constant "{field_name}" is not supported for calldata parameter conversion.')
-            return None
+            if isinstance(value, ResolvedMapReference):
+                raise ValueError(f'Map reference "{field_name}" is not supported for calldata parameter conversion.')
+            raise ValueError(f'Constant "{field_name}" is not supported for calldata parameter conversion.')
 
         try:
             callee_path = _resolve_calldata_resolved_value(field.params.callee, "callee")
             selector_path = _resolve_calldata_resolved_value(field.params.selector, "selector")
             amount_path = _resolve_calldata_resolved_value(field.params.amount, "amount")
             spender_path = _resolve_calldata_resolved_value(field.params.spender, "spender")
+            _resolve_calldata_resolved_value(field.params.chainId, "chainId")
+            if field.params.chainIdPath is not None:
+                chainid_path = _resolve_calldata_param_path(str(field.params.chainIdPath))
         except ValueError as e:
             return out.error(
                 title="Calldata param error",
