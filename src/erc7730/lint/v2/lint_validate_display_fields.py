@@ -8,6 +8,7 @@ In v2, ABI and EIP-712 schemas are NOT embedded in the descriptor. Instead:
 """
 
 import json
+from collections.abc import Sequence
 from typing import Any, final, override
 
 from pydantic_string_url import HttpUrl
@@ -19,11 +20,13 @@ from erc7730.lint.v2 import ERC7730Linter
 from erc7730.lint.v2.path_schemas import compute_format_schema_paths
 from erc7730.model.abi import Component, Function, InputOutput
 from erc7730.model.input.v2.descriptor import InputERC7730Descriptor
-from erc7730.model.paths import DataPath, Field
+from erc7730.model.paths import DataPath, DataPathElement, Field
 from erc7730.model.paths.path_ops import data_path_starts_with
 from erc7730.model.paths.path_schemas import compute_abi_schema_paths
 from erc7730.model.resolved.v2.context import ResolvedContractContext, ResolvedDeployment, ResolvedEIP712Context
 from erc7730.model.resolved.v2.descriptor import ResolvedERC7730Descriptor
+
+type Parameter = InputOutput | Component
 
 
 @final
@@ -148,17 +151,12 @@ class ValidateDisplayFieldsLinter(ERC7730Linter):
         explorer_url: HttpUrl,
         out: OutputAdder,
     ) -> None:
-        # Build ABI paths by selector
-        abi_paths_by_selector: dict[str, set[DataPath]] = {}
-        for selector, abi in reference_abis.functions.items():
-            abi_paths_by_selector[selector] = compute_abi_schema_paths(abi)
-
         # Parse the input format keys, which carry the parameter names resolution reduced to selectors
         declared_abis_by_selector = self._parse_declared_abis(input_descriptor)
 
         # Validate display field paths against ABI paths
         for selector, fmt in descriptor.display.formats.items():
-            if selector not in abi_paths_by_selector:
+            if selector not in reference_abis.functions:
                 out.warning(
                     title="Unknown selector",
                     message=f"Selector {selector} in display formats not found in reference ABI (see {explorer_url}). "
@@ -166,30 +164,35 @@ class ValidateDisplayFieldsLinter(ERC7730Linter):
                 )
                 continue
 
-            format_paths = compute_format_schema_paths(fmt)
-            abi_paths = abi_paths_by_selector[selector]
-            unnamed_parameter_names = self._unnamed_parameter_names(
-                reference_abis.functions[selector], declared_abis_by_selector.get(selector)
-            )
+            # Paths refer to the parameter names of the format key, which can differ from the reference ABI names
+            abi = reference_abis.functions[selector]
+            declared_abi = self._declared_reference_abi(abi, declared_abis_by_selector.get(selector))
+            declared_paths = compute_abi_schema_paths(declared_abi)
 
             # Check for display fields referencing non-existent ABI paths.
-            # A format path is valid if it matches an ABI path exactly OR is a prefix of one
+            # A format path is valid if it matches a declared path exactly OR is a prefix of one
             # (e.g. defining a field for an array root covers all nested elements).
-            for path in format_paths.data_paths - abi_paths:
-                if not any(data_path_starts_with(abi_path, path) for abi_path in abi_paths):
-                    if self._root_name(path) in unnamed_parameter_names:
-                        continue
+            # A path that uses the reference ABI names is also valid.
+            covering_paths: set[DataPath] = set()
+            for path in compute_format_schema_paths(fmt).data_paths:
+                candidates = [path]
+                if (translated := self._translate_path(path, abi.inputs, declared_abi.inputs)) is not None:
+                    candidates.append(translated)
+                valid = next((c for c in candidates if self._path_exists(c, declared_paths)), None)
+                if valid is None:
                     out.error(
                         title="Invalid display field",
                         message=f"A display field is defined for `{path}`, but it does not exist in function "
                         f"{selector} ABI (see {explorer_url}). Please check the field path is valid.",
                     )
+                    continue
+                covering_paths.add(valid)
 
             # Check for ABI paths without corresponding display fields.
-            # An ABI path is covered if it matches a format path exactly OR a format path is a prefix of it
+            # A path is covered if it matches a format path exactly OR a format path is a prefix of it
             # (e.g. a field defined for an array root covers all descendant paths).
-            for path in abi_paths - format_paths.data_paths:
-                if not any(data_path_starts_with(path, fmt_path) for fmt_path in format_paths.data_paths):
+            for path in declared_paths - covering_paths:
+                if not any(data_path_starts_with(path, fmt_path) for fmt_path in covering_paths):
                     out.warning(
                         title="Missing display field",
                         message=f"No display field is defined for path `{path}` in function {selector} "
@@ -210,7 +213,8 @@ class ValidateDisplayFieldsLinter(ERC7730Linter):
         """
         Parse the function signatures declared as display format keys, indexed by selector.
 
-        Format keys that are already selectors declare no parameter name, and are skipped.
+        Format keys that are already selectors declare no parameter name, and are skipped. The input descriptor is
+        loaded with its includes merged, so the format keys of included files are parsed too.
 
         :param input_descriptor: input descriptor the linted descriptor was resolved from
         :return: declared ABI functions, by selector
@@ -227,36 +231,83 @@ class ValidateDisplayFieldsLinter(ERC7730Linter):
         return declared_abis
 
     @classmethod
-    def _unnamed_parameter_names(cls, abi: Function, declared_abi: Function | None) -> set[str]:
+    def _declared_reference_abi(cls, abi: Function, declared_abi: Function | None) -> Function:
         """
-        Get the names the descriptor gave to the parameters the reference ABI left unnamed.
+        Rename the parameters of the reference ABI with the names declared in the format key.
 
-        Unnamed parameters carry an empty name in the reference ABI, so no path is computed for them. The descriptor
-        names them in its format key, and such a name is only valid at the position it is declared at.
+        Parameters are matched by position, recursively for tuple components. A parameter keeps its reference ABI
+        name if the format key gives it no name, or if the types differ.
 
         :param abi: reference ABI of the function, as fetched from the explorer
         :param declared_abi: ABI declared by the descriptor format key, if it was a signature and not a selector
-        :return: declared names of the parameters the reference ABI leaves unnamed
+        :return: the reference ABI, with the parameter names of the format key
         """
         if declared_abi is None:
-            return set()
-        parameters, declared_parameters = abi.inputs or [], declared_abi.inputs or []
-        if len(parameters) != len(declared_parameters):
-            return set()  # not expected, as both share the same selector
-        return {
-            declared_parameter.name
-            for parameter, declared_parameter in zip(parameters, declared_parameters, strict=True)
-            if not parameter.name and declared_parameter.name
-        }
+            return abi
+        return abi.model_copy(update={"inputs": cls._declared_parameters(abi.inputs, declared_abi.inputs)})
 
     @classmethod
-    def _root_name(cls, path: DataPath) -> str | None:
-        """
-        Get the identifier of the first element of a data path, if it is a field.
+    def _declared_parameters(
+        cls, parameters: Sequence[Parameter] | None, declared_parameters: Sequence[Parameter] | None
+    ) -> list[Any] | None:
+        if parameters is None:
+            return None
+        if declared_parameters is None or len(parameters) != len(declared_parameters):
+            return list(parameters)
+        renamed: list[Parameter] = []
+        for parameter, declared in zip(parameters, declared_parameters, strict=True):
+            if parameter.type != declared.type:
+                renamed.append(parameter)
+                continue
+            renamed.append(
+                parameter.model_copy(
+                    update={
+                        "name": declared.name or parameter.name,
+                        "components": cls._declared_parameters(parameter.components, declared.components),
+                    }
+                )
+            )
+        return renamed
 
-        :param path: data path to inspect
-        :return: the top-level field identifier, or None if the path does not start with a field
+    @classmethod
+    def _translate_path(
+        cls,
+        path: DataPath,
+        parameters: Sequence[Parameter] | None,
+        declared_parameters: Sequence[Parameter] | None,
+    ) -> DataPath | None:
         """
-        if path.elements and isinstance(root := path.elements[0], Field):
-            return root.identifier
-        return None
+        Translate a data path that uses the reference ABI names into a data path that uses the declared names.
+
+        :param path: data path, with reference ABI parameter names
+        :param parameters: parameters of the reference ABI
+        :param declared_parameters: the same parameters, with the declared names
+        :return: the data path with the declared names, or None if a field is not in the reference ABI
+        """
+        if not path.absolute:
+            return None
+        elements: list[DataPathElement] = []
+        for element in path.elements:
+            if not isinstance(element, Field):
+                elements.append(element)
+                continue
+            if parameters is None or declared_parameters is None:
+                return None
+            index = next((i for i, p in enumerate(parameters) if p.name and p.name == element.identifier), None)
+            if index is None:
+                return None
+            declared = declared_parameters[index]
+            elements.append(Field(identifier=declared.name))
+            parameters, declared_parameters = parameters[index].components, declared.components
+        return DataPath(absolute=True, elements=elements)
+
+    @classmethod
+    def _path_exists(cls, path: DataPath, paths: set[DataPath]) -> bool:
+        """
+        Check that a path matches one of the paths exactly, or is a prefix of one.
+
+        :param path: data path to check
+        :param paths: valid data paths
+        :return: True if the path is valid
+        """
+        return path in paths or any(data_path_starts_with(p, path) for p in paths)

@@ -7,7 +7,7 @@ from tests.v2.lint.conftest import LintDescriptor
 # the functions the descriptor declares formats for
 TRANSFER = parse_signature("transfer(address _to, uint256 _value)")
 APPROVE = parse_signature("approve(address _spender, uint256 _value)")
-# same functions with different parameter names, so display field paths do not match
+# same functions with different parameter names, which display field paths do not need to use
 TRANSFER_RENAMED = parse_signature("transfer(address to, uint256 value)")
 APPROVE_RENAMED = parse_signature("approve(address spender, uint256 value)")
 
@@ -28,8 +28,8 @@ def test_deployments_with_different_abis_are_reported_and_each_validated(lint_de
 
     out = lint_descriptor(abis_of, False)
     assert titles(out, "Deployment ABIs differ") == 1
-    # the chain 137 ABI names the parameters differently, so the 4 display fields are invalid against it only
-    assert titles(out, "Invalid display field") == 4
+    # paths use the format key names, so the display fields are also valid against the chain 137 ABI
+    assert titles(out, "Invalid display field") == 0
 
 
 def test_a_deployment_that_cannot_be_fetched_does_not_stop_the_others(lint_descriptor: LintDescriptor) -> None:
@@ -41,4 +41,4 @@ def test_a_deployment_that_cannot_be_fetched_does_not_stop_the_others(lint_descr
     out = lint_descriptor(abis_of, False)
     assert titles(out, "Contract not verified") == 1
     assert titles(out, "Deployment ABIs differ") == 0
-    assert titles(out, "Invalid display field") == 4
+    assert titles(out, "Invalid display field") == 0
